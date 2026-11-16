@@ -1,0 +1,14 @@
+{
+  "name": "better-code-marketplace",
+  "owner": {
+    "name": "stlab"
+  },
+  "plugins": [
+    {
+      "name": "better-code",
+      "description": "Skills for code, contracts, writing, and algorithm research",
+      "version": "1.0.0",
+      "source": "./"
+    }
+  ]
+}

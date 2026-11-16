@@ -1,0 +1,10 @@
+{
+  "name": "better-code",
+  "description": "Skills for code, contracts, writing, and algorithm research",
+  "version": "1.0.0",
+  "author": {
+    "name": "stlab"
+  },
+  "repository": "https://github.com/stlab/better-code-skill",
+  "license": "BSL-1.0"
+}
