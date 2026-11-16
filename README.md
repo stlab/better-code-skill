@@ -1,7 +1,7 @@
 # Better Code skills
 
 Better Code is a collection of skills for GitHub Copilot CLI. It guides coding,
-contract drafting, writing, and algorithm research. The skills depend on
+contract drafting, writing, algorithm research, and work tracking. The skills depend on
 Superpowers and Technical Documentation; install both companions before using
 the Better Code plugin.
 
@@ -33,7 +33,7 @@ copilot plugin marketplace add stlab/better-code-skill
 copilot plugin install better-code@better-code-marketplace
 ```
 
-Run `copilot skill list` to check that the plugin's four skills are available.
+Run `copilot skill list` to check that the plugin's five skills are available.
 Copilot may display the short skill names in this list. Start a new Copilot
 session after installation.
 
@@ -46,6 +46,7 @@ The plugin provides these namespaced skills:
 - `better-code:writing`: clear prose, comments, and documentation.
 - `better-code:algorithm-research`: research standard algorithms and libraries
   after implementation planning.
+- `better-code:doing`: track started work across repositories and sessions.
 
 Better Code invokes Superpowers for development process and its own Writing and
 Contracts skills when needed. Writing invokes Technical Documentation for
@@ -55,6 +56,35 @@ installing Better Code does not install them.
 
 If you previously installed standalone copies of these skills, remove or disable
 the duplicates to avoid ambiguous skill names.
+
+## Track work
+
+Doing keeps a Markdown checklist in `~/.better-code/doing.md`. It records started
+work, not a backlog, and keeps completed entries. The file contains task
+descriptions, locations, and session details in plaintext on your computer.
+Don't include secrets in descriptions.
+
+The skill asks the agent to track multistep tasks automatically. Automatic
+tracking depends on the agent discovering and following the skill and having
+permission to write the file. The helper requires Python 3.9 or later and a
+filesystem that supports POSIX directory locking; it has been tested on macOS.
+
+In Copilot, you can invoke the skill explicitly:
+
+```text
+/better-code:doing
+/better-code:doing show
+/better-code:doing show all
+/better-code:doing task Investigate the parser
+/better-code:doing done
+```
+
+The slash-command picker shows `show [all] | task <DESCRIPTION> | done` beside the skill.
+
+Invoking the skill without arguments or with `show` lists open work; `show all`
+includes completed work. If the current task
+can't be identified safely, the agent asks which task to complete. Session and
+tmux details are recorded only when available.
 
 ## Update
 
