@@ -7,7 +7,7 @@ the Better Code plugin.
 
 ## Prerequisites
 
-Install [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/quickstart)
+Install [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)
 and Node.js 22.20 or later.
 
 Install [Superpowers](https://github.com/obra/superpowers) using its marketplace:
