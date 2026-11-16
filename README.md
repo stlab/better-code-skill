@@ -21,7 +21,7 @@ Install [Technical Documentation](https://skills.wondel.ai/skills/technical-docu
 for Copilot:
 
 ```bash
-npx skills add wondelai/skills/technical-documentation --global --agent github-copilot
+npx skills add wondelai/skills --skill technical-documentation --global --agent github-copilot
 ```
 
 ## Install Better Code
