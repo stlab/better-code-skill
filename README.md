@@ -29,7 +29,7 @@ npx skills add wondelai/skills --skill technical-documentation --global --agent 
 Register the marketplace and install the plugin:
 
 ```bash
-copilot plugin marketplace add stlab/better-code-skill
+copilot plugin marketplace add stlab/better-code-skills
 copilot plugin install better-code@better-code-marketplace
 ```
 
