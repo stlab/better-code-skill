@@ -1,6 +1,7 @@
 """Regression tests for ledger row boundaries and storage."""
 
 from contextlib import redirect_stderr, redirect_stdout
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import io
 import json
@@ -16,7 +17,8 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "doing.py"
-HELPER = runpy.run_path(str(SCRIPT))
+with mock.patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
+    HELPER = runpy.run_path(str(SCRIPT))
 
 
 class LedgerRowTests(unittest.TestCase):
@@ -26,7 +28,7 @@ class LedgerRowTests(unittest.TestCase):
         """Run the helper with an isolated home and capture its output."""
         return subprocess.run(
             [sys.executable, str(SCRIPT), *args],
-            env=dict(os.environ, HOME=home),
+            env=dict(os.environ, HOME=home, USERPROFILE=home, PYTHONUTF8="1"),
             text=True,
             capture_output=True,
             timeout=10,
@@ -101,7 +103,66 @@ class LedgerRowTests(unittest.TestCase):
             self.assertEqual(history.returncode, 0, history.stderr)
             self.assertTrue(json.loads(history.stdout)[0]["completed"])
 
+    def test_concurrent_writers_preserve_every_task(self):
+        """Serialize concurrent writes without losing entries."""
+        with tempfile.TemporaryDirectory() as home:
+            descriptions = [f"Concurrent task {index}" for index in range(16)]
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                results = list(pool.map(
+                    lambda text: self.run_doing(home, "task", text),
+                    descriptions,
+                ))
+            for result in results:
+                self.assertEqual(result.returncode, 0, result.stderr)
+            shown = self.run_doing(home, "show", "--json")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            rows = json.loads(shown.stdout)
+            self.assertEqual(sorted(row["description"] for row in rows),
+                             sorted(descriptions))
+            self.assertEqual(len({row["id"] for row in rows}), 16)
 
+    def test_unicode_home_directory_round_trip(self):
+        """Use the native home directory even when its path is not ASCII."""
+        with tempfile.TemporaryDirectory() as root:
+            home = str(Path(root) / "profile-\u03bb")
+            Path(home).mkdir()
+            created = self.run_doing(home, "task", "Task \u03bb")
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertTrue((Path(home) / ".better-code" / "doing.md").is_file())
+            shown = self.run_doing(home, "show", "--json")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertEqual(json.loads(shown.stdout)[0]["description"], "Task \u03bb")
+
+    def test_redirected_storage_is_rejected(self):
+        """Reject a storage symlink or Windows junction without writing through it."""
+        with tempfile.TemporaryDirectory() as home:
+            target = Path(home) / "target"
+            target.mkdir()
+            link = Path(home) / ".better-code"
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                    capture_output=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            else:
+                link.symlink_to(target, target_is_directory=True)
+            for args in (("task", "Must not write"), ("show",)):
+                result = self.run_doing(home, *args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_missing_ledger_read_does_not_create_storage(self):
+        """Show an empty ledger without creating the storage directory."""
+        with tempfile.TemporaryDirectory() as home:
+            result = self.run_doing(home, "show", "--json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), [])
+            self.assertFalse((Path(home) / ".better-code").exists())
+
+
+@unittest.skipIf(os.name == "nt", "POSIX directory synchronization")
 class LedgerSyncTests(unittest.TestCase):
     """Check synchronization and failure reporting with real ledger files."""
 
@@ -109,7 +170,7 @@ class LedgerSyncTests(unittest.TestCase):
         """Invoke the CLI in process so filesystem errors can be injected."""
         stdout, stderr = io.StringIO(), io.StringIO()
         code = 0
-        with mock.patch.dict(os.environ, HOME=home):
+        with mock.patch.dict(os.environ, HOME=home, USERPROFILE=home):
             with mock.patch.object(sys, "argv", [str(SCRIPT), *args]):
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     try:
