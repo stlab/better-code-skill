@@ -67,7 +67,10 @@ def parse_ledger(text):
         raise LedgerError("Malformed ledger header")
     entries = []
     seen = set()
-    for line in text[len(HEADER):].splitlines():
+    lines = text[len(HEADER):].split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    for line in lines:
         match = ROW.fullmatch(line)
         if match is None:
             raise LedgerError("Malformed ledger row")
