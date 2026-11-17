@@ -19,9 +19,11 @@ that task is complete, mark its entry done. Never mark an incomplete task done
 because the session ended or the user changed topics.
 
 Use the bundled helper for all reads and changes; never edit the table directly.
-Run `python3` on `scripts/doing.py` relative to this skill's installed directory,
-not the current working directory. If the helper, Python 3, or ledger access is
-unavailable, report the error; don't claim the work was tracked.
+Run `scripts/doing.py` with Python 3 relative to this skill's installed directory,
+not the current working directory. Use `python3` on POSIX; on native Windows,
+use `py -3` or a `python` command verified to run Python 3. If the helper,
+Python 3, or ledger access is unavailable, report the error; don't claim the
+work was tracked.
 
 To start, run `task DESCRIPTION` with the available metadata options:
 `--location`, `--session-name`, `--session-id`, and `--tmux`. Pass each value as

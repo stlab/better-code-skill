@@ -21,6 +21,17 @@ with mock.patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
     HELPER = runpy.run_path(str(SCRIPT))
 
 
+def link_directory(link, target):
+    """Create a directory symlink or an unprivileged Windows junction."""
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True, timeout=10, check=True,
+        )
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
 class LedgerRowTests(unittest.TestCase):
     """Check text round trips and malformed-row rejection through the CLI."""
 
@@ -108,10 +119,11 @@ class LedgerRowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             descriptions = [f"Concurrent task {index}" for index in range(16)]
             with ThreadPoolExecutor(max_workers=16) as pool:
-                results = list(pool.map(
-                    lambda text: self.run_doing(home, "task", text),
-                    descriptions,
-                ))
+                futures = []
+                for text in descriptions:
+                    futures.append(pool.submit(self.run_doing, home, "task", text))
+                    futures.append(pool.submit(self.run_doing, home, "show", "--json"))
+                results = [future.result() for future in futures]
             for result in results:
                 self.assertEqual(result.returncode, 0, result.stderr)
             shown = self.run_doing(home, "show", "--json")
@@ -139,19 +151,28 @@ class LedgerRowTests(unittest.TestCase):
             target = Path(home) / "target"
             target.mkdir()
             link = Path(home) / ".better-code"
-            if os.name == "nt":
-                result = subprocess.run(
-                    ["cmd", "/c", "mklink", "/J", str(link), str(target)],
-                    capture_output=True, timeout=10,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-            else:
-                link.symlink_to(target, target_is_directory=True)
+            link_directory(link, target)
             for args in (("task", "Must not write"), ("show",)):
                 result = self.run_doing(home, *args)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertEqual(result.stdout, "")
             self.assertEqual(list(target.iterdir()), [])
+
+    def test_redirected_ledger_is_rejected(self):
+        """Reject a redirected ledger without traversing it or overwriting it."""
+        with tempfile.TemporaryDirectory() as home:
+            target = Path(home) / "target"
+            target.mkdir()
+            marker = target / "untouched"
+            marker.write_text("original")
+            storage = Path(home) / ".better-code"
+            storage.mkdir()
+            link_directory(storage / "doing.md", target)
+            for args in (("show",), ("task", "Must not write")):
+                result = self.run_doing(home, *args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+            self.assertEqual(marker.read_text(), "original")
 
     def test_missing_ledger_read_does_not_create_storage(self):
         """Show an empty ledger without creating the storage directory."""
@@ -162,9 +183,8 @@ class LedgerRowTests(unittest.TestCase):
             self.assertFalse((Path(home) / ".better-code").exists())
 
 
-@unittest.skipIf(os.name == "nt", "POSIX directory synchronization")
-class LedgerSyncTests(unittest.TestCase):
-    """Check synchronization and failure reporting with real ledger files."""
+class InProcessCLI(unittest.TestCase):
+    """CLI fixture for injecting operating-system failures."""
 
     def run_main(self, home, *args):
         """Invoke the CLI in process so filesystem errors can be injected."""
@@ -179,6 +199,11 @@ class LedgerSyncTests(unittest.TestCase):
                         code = error.code
         return subprocess.CompletedProcess(args, code, stdout.getvalue(),
                                            stderr.getvalue())
+
+
+@unittest.skipIf(os.name == "nt", "POSIX directory synchronization")
+class LedgerSyncTests(InProcessCLI):
+    """Check synchronization and failure reporting with real ledger files."""
 
     def test_writes_sync_file_then_replace_then_directory_before_success(self):
         """Sync parent and replacement metadata before acknowledging writes."""
@@ -312,6 +337,85 @@ class LedgerSyncTests(unittest.TestCase):
             self.assertNotIn("may have been saved", result.stderr)
             self.assertEqual(ledger.read_bytes(), previous)
             self.assertEqual(list(ledger.parent.iterdir()), [ledger])
+
+
+@unittest.skipUnless(os.name == "nt", "Native Windows storage")
+class WindowsStoreTests(InProcessCLI):
+    """Exercise native replacement, locking and failure reporting."""
+
+    def test_replacement_failure_reports_uncertain_task_without_data_loss(self):
+        """Report replacement errors and preserve readable existing work."""
+        backend = sys.modules["windows_store"]
+        for command in ("task", "done"):
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as home:
+                    first = self.run_main(home, "task", "Existing task")
+                    self.assertEqual(first.returncode, 0, first.stderr)
+                    task_id = json.loads(first.stdout)["id"]
+                    ledger = Path(home) / ".better-code" / "doing.md"
+                    previous = ledger.read_bytes()
+                    argument = "New task" if command == "task" else task_id
+                    with mock.patch.object(backend, "move_file", return_value=0):
+                        with mock.patch.object(backend.ctypes, "get_last_error",
+                                               return_value=5):
+                            result = self.run_main(home, command, argument)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("may have been saved", result.stderr)
+                    self.assertIn("show all --json", result.stderr)
+                    self.assertRegex(result.stderr, r"Task [0-9a-f]{32} update")
+                    if command == "done":
+                        self.assertIn(task_id, result.stderr)
+                    self.assertEqual(ledger.read_bytes(), previous)
+                    self.assertEqual(sorted(path.name for path in ledger.parent.iterdir()),
+                                     [".doing.lock", "doing.md"])
+                    retry = self.run_main(home, command, argument)
+                    self.assertEqual(retry.returncode, 0, retry.stderr)
+
+    def test_replacement_requests_write_through_after_content_sync(self):
+        """Flush contents before requesting a same-directory write-through move."""
+        backend = sys.modules["windows_store"]
+        with tempfile.TemporaryDirectory() as home:
+            events = []
+            real_sync, real_move = os.fsync, backend.move_file
+
+            def sync(descriptor):
+                """Record the real content flush."""
+                self.assertTrue(stat.S_ISREG(os.fstat(descriptor).st_mode))
+                self.assertEqual(sys.stdout.getvalue(), "")
+                real_sync(descriptor)
+                events.append("sync")
+
+            def move(source, destination, flags):
+                """Verify the replacement protocol while performing the real move."""
+                self.assertEqual(sys.stdout.getvalue(), "")
+                self.assertEqual(Path(source).parent, Path(destination).parent)
+                self.assertEqual(flags, 0x00000009)
+                events.append("replace")
+                return real_move(source, destination, flags)
+
+            with mock.patch("os.fsync", side_effect=sync):
+                with mock.patch.object(backend, "move_file", side_effect=move):
+                    result = self.run_main(home, "task", "Flushed task")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(events, ["sync", "replace"])
+            shown = self.run_main(home, "show", "--json")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertEqual(json.loads(shown.stdout)[0]["description"], "Flushed task")
+
+    def test_redirected_lock_file_is_rejected(self):
+        """Reject lock-file redirection without changing the target directory."""
+        with tempfile.TemporaryDirectory() as home:
+            storage = Path(home) / ".better-code"
+            storage.mkdir()
+            target = Path(home) / "target"
+            target.mkdir()
+            link_directory(storage / ".doing.lock", target)
+            result = self.run_main(home, "task", "Must not write")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(list(target.iterdir()), [])
+            self.assertFalse((storage / "doing.md").exists())
 
 
 if __name__ == "__main__":

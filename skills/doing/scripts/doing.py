@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import html
 import json
@@ -14,10 +15,13 @@ import stat
 import sys
 import uuid
 
-try:
-    import fcntl
-except ImportError as error:
-    raise SystemExit("doing: POSIX file locking is required") from error
+if os.name == "nt":
+    from windows_store import WindowsStore
+else:
+    try:
+        import fcntl
+    except ImportError as error:
+        raise SystemExit("doing: POSIX file locking is required") from error
 
 
 HEADER = (
@@ -122,12 +126,14 @@ def open_store(create):
     """Open the storage directory without following a symlink.
 
     Returns None if the directory is absent and create is false.
-    Creation requests sync the parent directory, including on retries.
+    POSIX creation requests sync the parent directory, including on retries.
     """
     home = Path.home()
     if not home.is_absolute():
         raise LedgerError("Home directory must be an absolute path")
     path = home / ".better-code"
+    if os.name == "nt":
+        return WindowsStore.open(path, create)
     if create:
         try:
             path.mkdir(mode=0o700)
@@ -157,6 +163,9 @@ def read_ledger(directory):
 
     Time and additional space: O(n), where n is the ledger size.
     """
+    if os.name == "nt":
+        text = directory.read()
+        return [] if text is None else parse_ledger(text)
     try:
         mode = os.stat("doing.md", dir_fd=directory, follow_symlinks=False).st_mode
     except FileNotFoundError:
@@ -171,13 +180,16 @@ def read_ledger(directory):
 
 
 def replace_ledger(directory, entries, task_id):
-    """Atomically replace the ledger and sync its directory.
+    """Replace the ledger and request platform-specific metadata persistence.
 
-    A directory sync failure reports task_id and an uncertain save status;
-    the replacement is already visible and is not rolled back.
+    A metadata persistence failure reports task_id and an uncertain save status;
+    a visible replacement is not rolled back.
 
     Time and additional space: O(n), where n is the rendered ledger size.
     """
+    if os.name == "nt":
+        directory.replace(render_ledger(entries), task_id)
+        return
     name = f".doing-{uuid.uuid4().hex}.tmp"
     descriptor = os.open(
         name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -203,13 +215,36 @@ def replace_ledger(directory, entries, task_id):
             pass
 
 
+@contextmanager
+def store_lock(directory):
+    """Hold an exclusive ledger lock until the context exits."""
+    if os.name == "nt":
+        directory.lock()
+    else:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        if os.name == "nt":
+            directory.unlock()
+        else:
+            fcntl.flock(directory, fcntl.LOCK_UN)
+
+
+def close_store(directory):
+    """Release an opened store's operating-system resources."""
+    if os.name == "nt":
+        directory.close()
+    else:
+        os.close(directory)
+
+
 def write_change(directory, command, args):
     """Apply one task creation or completion under an exclusive lock.
 
     Time and additional space: O(n), where n is the ledger size.
     """
-    fcntl.flock(directory, fcntl.LOCK_EX)
-    try:
+    with store_lock(directory):
         entries = read_ledger(directory)
         if command == "task":
             task_id = uuid.uuid4().hex
@@ -234,8 +269,6 @@ def write_change(directory, command, args):
             task_id = args.id
         replace_ledger(directory, entries, task_id)
         return task_id
-    finally:
-        fcntl.flock(directory, fcntl.LOCK_UN)
 
 
 def entry_json(entry):
@@ -286,9 +319,10 @@ def main():
                     task_id = write_change(directory, args.command, args)
                     print(json.dumps({"id": task_id}))
                     return
-                entries = read_ledger(directory)
+                with store_lock(directory):
+                    entries = read_ledger(directory)
             finally:
-                os.close(directory)
+                close_store(directory)
         if args.scope == "open":
             entries = [entry for entry in entries if not entry.completed]
         if args.json:
