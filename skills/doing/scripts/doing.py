@@ -122,6 +122,7 @@ def open_store(create):
     """Open the storage directory without following a symlink.
 
     Returns None if the directory is absent and create is false.
+    Creation requests sync the parent directory, including on retries.
     """
     home = Path.home()
     if not home.is_absolute():
@@ -142,6 +143,12 @@ def open_store(create):
         raise LedgerError("Storage directory is a symlink")
     if not stat.S_ISDIR(mode):
         raise LedgerError("Storage path is not a directory")
+    if create:
+        parent = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
     return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
 
@@ -163,8 +170,11 @@ def read_ledger(directory):
         return parse_ledger(file.read())
 
 
-def replace_ledger(directory, entries):
-    """Atomically replace the ledger with the supplied entries.
+def replace_ledger(directory, entries, task_id):
+    """Atomically replace the ledger and sync its directory.
+
+    A directory sync failure reports task_id and an uncertain save status;
+    the replacement is already visible and is not rolled back.
 
     Time and additional space: O(n), where n is the rendered ledger size.
     """
@@ -179,6 +189,13 @@ def replace_ledger(directory, entries):
             file.flush()
             os.fsync(file.fileno())
         os.replace(name, "doing.md", src_dir_fd=directory, dst_dir_fd=directory)
+        try:
+            os.fsync(directory)
+        except OSError as error:
+            raise LedgerError(
+                f"Task {task_id} update may have been saved; "
+                f"verify with show all --json before retrying: {error}"
+            ) from error
     finally:
         try:
             os.unlink(name, dir_fd=directory)
@@ -215,7 +232,7 @@ def write_change(directory, command, args):
             index = matches[0]
             entries[index] = replace(entries[index], completed=True)
             task_id = args.id
-        replace_ledger(directory, entries)
+        replace_ledger(directory, entries, task_id)
         return task_id
     finally:
         fcntl.flock(directory, fcntl.LOCK_UN)
