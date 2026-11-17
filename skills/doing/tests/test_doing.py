@@ -343,6 +343,40 @@ class LedgerSyncTests(InProcessCLI):
 class WindowsStoreTests(InProcessCLI):
     """Exercise native replacement, locking and failure reporting."""
 
+    def test_show_does_not_need_write_access_to_lock_file(self):
+        """Read a ledger when its persistent writer lock is read-only."""
+        with tempfile.TemporaryDirectory() as home:
+            created = self.run_main(home, "task", "Readable task")
+            self.assertEqual(created.returncode, 0, created.stderr)
+            lock = Path(home) / ".better-code" / ".doing.lock"
+            lock.chmod(stat.S_IREAD)
+            try:
+                shown = self.run_main(home, "show", "--json")
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                self.assertEqual(json.loads(shown.stdout)[0]["description"],
+                                 "Readable task")
+            finally:
+                lock.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+    def test_show_does_not_provision_lock_but_done_does(self):
+        """Read without creating a lock, but still serialize completion writes."""
+        with tempfile.TemporaryDirectory() as home:
+            created = self.run_main(home, "task", "Existing task")
+            self.assertEqual(created.returncode, 0, created.stderr)
+            task_id = json.loads(created.stdout)["id"]
+            lock = Path(home) / ".better-code" / ".doing.lock"
+            lock.unlink()
+            shown = self.run_main(home, "show", "--json")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertEqual(json.loads(shown.stdout)[0]["id"], task_id)
+            self.assertFalse(lock.exists())
+            completed = self.run_main(home, "done", task_id)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(lock.is_file())
+            history = self.run_main(home, "show", "all", "--json")
+            self.assertEqual(history.returncode, 0, history.stderr)
+            self.assertTrue(json.loads(history.stdout)[0]["completed"])
+
     def test_replacement_failure_reports_uncertain_task_without_data_loss(self):
         """Report replacement errors and preserve readable existing work."""
         backend = sys.modules["windows_store"]
