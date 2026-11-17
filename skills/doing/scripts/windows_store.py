@@ -11,6 +11,7 @@ import uuid
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 FILE_SHARE_READ_WRITE = 0x00000003
+FILE_SHARE_DELETE = 0x00000004
 OPEN_EXISTING = 3
 OPEN_ALWAYS = 4
 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -88,11 +89,13 @@ def close_handle(handle):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def open_checked(path, directory=False, create=False, writable=False):
-    """Open a non-redirected disk path and prevent its deletion while open."""
+def open_checked(path, directory=False, create=False, writable=False,
+                 share_delete=False):
+    """Open a non-redirected disk path, preventing deletion unless shared."""
     access = GENERIC_READ | (GENERIC_WRITE if writable else 0)
+    sharing = FILE_SHARE_READ_WRITE | (FILE_SHARE_DELETE if share_delete else 0)
     handle = create_file(
-        native_path(path), access, FILE_SHARE_READ_WRITE, None,
+        native_path(path), access, sharing, None,
         OPEN_ALWAYS if create else OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, None,
     )
@@ -113,18 +116,21 @@ def open_checked(path, directory=False, create=False, writable=False):
 
 
 class WindowsStore:
-    """A pinned storage directory and persistent reader/writer lock file."""
+    """A pinned storage directory with a persistent lock for writable access."""
 
     def __init__(self, path, directory, lock):
-        """Take ownership of the supplied directory and lock handles."""
+        """Take ownership of the directory and optional writer-lock handles."""
         self.path = path
         self.directory = directory
         self.lock_handle = lock
         self.overlapped = Overlapped()
 
     @classmethod
-    def open(cls, path, create):
-        """Open storage, returning None when absent and creation is disabled."""
+    def open(cls, path, create, writable=True):
+        """Open storage, returning None when absent and creation is disabled.
+
+        Read-only access does not provision a writer lock.
+        """
         if create:
             try:
                 path.mkdir(mode=0o700)
@@ -138,31 +144,38 @@ class WindowsStore:
             raise
         with ExitStack() as cleanup:
             cleanup.callback(close_handle, directory)
-            lock = open_checked(path / ".doing.lock", create=True, writable=True)
-            cleanup.callback(close_handle, lock)
+            lock = None
+            if writable:
+                lock = open_checked(path / ".doing.lock", create=True, writable=True)
+                cleanup.callback(close_handle, lock)
             store = cls(path, directory, lock)
             cleanup.pop_all()
         return store
 
     def lock(self):
-        """Wait for exclusive access to the ledger across processes."""
+        """Wait for exclusive writer access; read-only stores need no lock."""
+        if self.lock_handle is None:
+            return
         if not lock_file(self.lock_handle, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0,
                          ctypes.byref(self.overlapped)):
             raise ctypes.WinError(ctypes.get_last_error())
 
     def unlock(self):
-        """Release this store's acquired ledger lock."""
+        """Release the writer lock, if this store has one."""
+        if self.lock_handle is None:
+            return
         if not unlock_file(self.lock_handle, 0, 1, 0,
                            ctypes.byref(self.overlapped)):
             raise ctypes.WinError(ctypes.get_last_error())
 
     def read(self):
-        """Read UTF-8 ledger text, or return None if the file is absent.
+        """Read a UTF-8 ledger snapshot, or return None if the file is absent.
 
+        Concurrent replacement does not change the opened snapshot.
         Time and additional space: O(n), where n is the file size.
         """
         try:
-            handle = open_checked(self.path / "doing.md")
+            handle = open_checked(self.path / "doing.md", share_delete=True)
         except FileNotFoundError:
             return None
         with ExitStack() as cleanup:
@@ -175,6 +188,7 @@ class WindowsStore:
     def replace(self, text, task_id):
         """Replace the ledger with flushed UTF-8 text and request write-through.
 
+        Requires this store's writer lock to be held.
         A replacement error reports task_id and an uncertain save status.
         Time and additional space: O(n), where n is the text size.
         """
@@ -205,6 +219,7 @@ class WindowsStore:
     def close(self):
         """Close the lock and directory handles, releasing any remaining lock."""
         try:
-            close_handle(self.lock_handle)
+            if self.lock_handle is not None:
+                close_handle(self.lock_handle)
         finally:
             close_handle(self.directory)

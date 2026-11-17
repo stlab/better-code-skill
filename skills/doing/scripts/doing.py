@@ -122,18 +122,19 @@ def render_ledger(entries, include_ids=True):
     return "".join(lines)
 
 
-def open_store(create):
+def open_store(create, writable=True):
     """Open the storage directory without following a symlink.
 
     Returns None if the directory is absent and create is false.
     POSIX creation requests sync the parent directory, including on retries.
+    Read-only Windows access does not provision a writer lock.
     """
     home = Path.home()
     if not home.is_absolute():
         raise LedgerError("Home directory must be an absolute path")
     path = home / ".better-code"
     if os.name == "nt":
-        return WindowsStore.open(path, create)
+        return WindowsStore.open(path, create, writable)
     if create:
         try:
             path.mkdir(mode=0o700)
@@ -217,7 +218,7 @@ def replace_ledger(directory, entries, task_id):
 
 @contextmanager
 def store_lock(directory):
-    """Hold an exclusive ledger lock until the context exits."""
+    """Hold a ledger lock, except for Windows snapshot readers."""
     if os.name == "nt":
         directory.lock()
     else:
@@ -308,7 +309,8 @@ def main():
     try:
         if args.command == "task" and not args.description.strip():
             raise LedgerError("Task description must not be empty")
-        directory = open_store(args.command == "task")
+        directory = open_store(args.command == "task",
+                               writable=args.command != "show")
         if directory is None:
             if args.command == "done":
                 raise LedgerError("Task ledger does not exist")

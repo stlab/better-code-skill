@@ -72,9 +72,11 @@ On Windows, `~` resolves to your user profile, normally
 `%USERPROFILE%\.better-code\doing.md`.
 
 POSIX storage requires directory locking and directory synchronization
-(`fsync`). Windows storage uses native file locking and keeps a persistent
+(`fsync`). Windows writers use native file locking and keep a persistent
 `.doing.lock` file beside the ledger. Don't delete that lock file while agents
 are running. Windows files inherit access controls from their parent directory.
+Windows `show` reads a snapshot without creating or writing the lock file.
+Concurrent updates can appear in the next `show` result.
 Keep the ledger on a local filesystem that supports the platform's locking and
 replacement operations.
 
