@@ -64,10 +64,18 @@ work, not a backlog, and keeps completed entries. The file contains task
 descriptions, locations, and session details in plaintext on your computer.
 Don't include secrets in descriptions.
 
-The skill asks the agent to track multistep tasks automatically. Automatic
-tracking depends on the agent discovering and following the skill and having
-permission to write the file. The helper requires Python 3.9 or later, with no
-additional Python packages. It supports native Windows, macOS, and Linux.
+The plugin's session-start and prompt-submission hooks inject instructions to
+track every started task, including single-step work, without invoking another
+Better Code skill first. The hooks run on session resume too; continuations
+reuse the task's existing entry. Requests only to display the list do not add
+entries.
+
+The hooks use Node.js and return context to Copilot; they do not read prompt
+contents, write the ledger, or edit your user-level instructions. Automatic
+tracking still depends on enabled hooks, the agent following the instructions,
+and permission to run the helper and write the ledger. The helper requires
+Python 3.9 or later, with no additional Python packages. It supports native
+Windows, macOS, and Linux.
 On Windows, `~` resolves to your user profile, normally
 `%USERPROFILE%\.better-code\doing.md`.
 
@@ -101,6 +109,9 @@ In Copilot, you can invoke the skill explicitly:
 ```
 
 The slash-command picker shows `show [all] | task <DESCRIPTION> | done` beside the skill.
+
+To verify automatic tracking, start a task in a new Copilot session and use
+`/better-code:doing show all` to inspect its entry after the task finishes.
 
 Invoking the skill without arguments or with `show` lists open work; `show all`
 includes completed work. If the current task
