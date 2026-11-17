@@ -1,6 +1,6 @@
 ---
 name: doing
-description: "Commands: show [all] | task <DESCRIPTION> | done. Use when tracking started or completing multistep work."
+description: Use when starting, continuing, or completing any task, including single-step work, or when displaying tracked work.
 argument-hint: "show [all] | task <DESCRIPTION> | done"
 ---
 
@@ -12,11 +12,18 @@ open. Separate tasks in one session can be open at the same time.
 
 ## Automatic tracking
 
-When starting a new multistep task, record it before beginning substantive work.
+When starting any new task, including single-step work, record it before
+beginning substantive work. The plugin's session-start and prompt-submission
+hooks inject this rule independently of other Better Code skills.
 Record one entry for the work being started, not its planned subtasks. A task
 already recorded keeps its ID when work continues or the session resumes. When
 that task is complete, mark its entry done. Never mark an incomplete task done
 because the session ended or the user changed topics.
+
+If the saved ID is unavailable when continuing or resuming, inspect
+`show --json` and match the current session ID and task context before creating
+an entry. Reuse an identifiable existing entry; ask when the match is ambiguous.
+Repeated prompts or hook reminders do not start another entry for the same task.
 
 Use the bundled helper for all reads and changes; never edit the table directly.
 Run `scripts/doing.py` with Python 3 relative to this skill's installed directory,
