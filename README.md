@@ -66,8 +66,29 @@ Don't include secrets in descriptions.
 
 The skill asks the agent to track multistep tasks automatically. Automatic
 tracking depends on the agent discovering and following the skill and having
-permission to write the file. The helper requires Python 3.9 or later and a
-filesystem that supports POSIX directory locking; it has been tested on macOS.
+permission to write the file. The helper requires Python 3.9 or later, with no
+additional Python packages. It supports native Windows, macOS, and Linux.
+On Windows, `~` resolves to your user profile, normally
+`%USERPROFILE%\.better-code\doing.md`.
+
+POSIX storage requires directory locking and directory synchronization
+(`fsync`). Windows writers use native file locking and keep a persistent
+`.doing.lock` file beside the ledger. Don't delete that lock file while agents
+are running. Windows files inherit access controls from their parent directory.
+Windows `show` reads a snapshot without creating or writing the lock file.
+Concurrent updates can appear in the next `show` result.
+Keep the ledger on a local filesystem that supports the platform's locking and
+replacement operations.
+
+Writes flush temporary file contents before replacement. POSIX then syncs the
+ledger directory; Windows requests a write-through replacement with `MoveFileExW`.
+These operations do not guarantee recovery from every hardware or filesystem
+failure, and Windows does not provide the same parent-directory sync used by the
+POSIX implementation.
+
+If the helper reports that an update may have been saved, inspect its
+`show all --json` output for the reported task ID before retrying. An error after
+replacement does not roll back a visible update.
 
 In Copilot, you can invoke the skill explicitly:
 

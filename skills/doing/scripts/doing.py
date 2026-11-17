@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import html
 import json
@@ -14,10 +15,13 @@ import stat
 import sys
 import uuid
 
-try:
-    import fcntl
-except ImportError as error:
-    raise SystemExit("doing: POSIX file locking is required") from error
+if os.name == "nt":
+    from windows_store import WindowsStore
+else:
+    try:
+        import fcntl
+    except ImportError as error:
+        raise SystemExit("doing: POSIX file locking is required") from error
 
 
 HEADER = (
@@ -118,15 +122,19 @@ def render_ledger(entries, include_ids=True):
     return "".join(lines)
 
 
-def open_store(create):
+def open_store(create, writable=True):
     """Open the storage directory without following a symlink.
 
     Returns None if the directory is absent and create is false.
+    POSIX creation requests sync the parent directory, including on retries.
+    Read-only Windows access does not provision a writer lock.
     """
     home = Path.home()
     if not home.is_absolute():
         raise LedgerError("Home directory must be an absolute path")
     path = home / ".better-code"
+    if os.name == "nt":
+        return WindowsStore.open(path, create, writable)
     if create:
         try:
             path.mkdir(mode=0o700)
@@ -142,6 +150,12 @@ def open_store(create):
         raise LedgerError("Storage directory is a symlink")
     if not stat.S_ISDIR(mode):
         raise LedgerError("Storage path is not a directory")
+    if create:
+        parent = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
     return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
 
@@ -150,6 +164,9 @@ def read_ledger(directory):
 
     Time and additional space: O(n), where n is the ledger size.
     """
+    if os.name == "nt":
+        text = directory.read()
+        return [] if text is None else parse_ledger(text)
     try:
         mode = os.stat("doing.md", dir_fd=directory, follow_symlinks=False).st_mode
     except FileNotFoundError:
@@ -163,11 +180,17 @@ def read_ledger(directory):
         return parse_ledger(file.read())
 
 
-def replace_ledger(directory, entries):
-    """Atomically replace the ledger with the supplied entries.
+def replace_ledger(directory, entries, task_id):
+    """Replace the ledger and request platform-specific metadata persistence.
+
+    A metadata persistence failure reports task_id and an uncertain save status;
+    a visible replacement is not rolled back.
 
     Time and additional space: O(n), where n is the rendered ledger size.
     """
+    if os.name == "nt":
+        directory.replace(render_ledger(entries), task_id)
+        return
     name = f".doing-{uuid.uuid4().hex}.tmp"
     descriptor = os.open(
         name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -179,6 +202,13 @@ def replace_ledger(directory, entries):
             file.flush()
             os.fsync(file.fileno())
         os.replace(name, "doing.md", src_dir_fd=directory, dst_dir_fd=directory)
+        try:
+            os.fsync(directory)
+        except OSError as error:
+            raise LedgerError(
+                f"Task {task_id} update may have been saved; "
+                f"verify with show all --json before retrying: {error}"
+            ) from error
     finally:
         try:
             os.unlink(name, dir_fd=directory)
@@ -186,13 +216,36 @@ def replace_ledger(directory, entries):
             pass
 
 
+@contextmanager
+def store_lock(directory):
+    """Hold a ledger lock, except for Windows snapshot readers."""
+    if os.name == "nt":
+        directory.lock()
+    else:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        if os.name == "nt":
+            directory.unlock()
+        else:
+            fcntl.flock(directory, fcntl.LOCK_UN)
+
+
+def close_store(directory):
+    """Release an opened store's operating-system resources."""
+    if os.name == "nt":
+        directory.close()
+    else:
+        os.close(directory)
+
+
 def write_change(directory, command, args):
     """Apply one task creation or completion under an exclusive lock.
 
     Time and additional space: O(n), where n is the ledger size.
     """
-    fcntl.flock(directory, fcntl.LOCK_EX)
-    try:
+    with store_lock(directory):
         entries = read_ledger(directory)
         if command == "task":
             task_id = uuid.uuid4().hex
@@ -215,10 +268,8 @@ def write_change(directory, command, args):
             index = matches[0]
             entries[index] = replace(entries[index], completed=True)
             task_id = args.id
-        replace_ledger(directory, entries)
+        replace_ledger(directory, entries, task_id)
         return task_id
-    finally:
-        fcntl.flock(directory, fcntl.LOCK_UN)
 
 
 def entry_json(entry):
@@ -258,7 +309,8 @@ def main():
     try:
         if args.command == "task" and not args.description.strip():
             raise LedgerError("Task description must not be empty")
-        directory = open_store(args.command == "task")
+        directory = open_store(args.command == "task",
+                               writable=args.command != "show")
         if directory is None:
             if args.command == "done":
                 raise LedgerError("Task ledger does not exist")
@@ -269,9 +321,10 @@ def main():
                     task_id = write_change(directory, args.command, args)
                     print(json.dumps({"id": task_id}))
                     return
-                entries = read_ledger(directory)
+                with store_lock(directory):
+                    entries = read_ledger(directory)
             finally:
-                os.close(directory)
+                close_store(directory)
         if args.scope == "open":
             entries = [entry for entry in entries if not entry.completed]
         if args.json:
