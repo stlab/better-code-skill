@@ -29,11 +29,12 @@ HEADER = (
     "| --- | --- | --- | --- |\n"
 )
 ROW = re.compile(
-    r"^\| \[([ x])\] (.*?) <!-- doing:([0-9a-f]{32}):([0-9a-f]*)"
-    r"(?::([0-9a-f]*))? -->"
+    r"^\| \[([ x])\] (.*?) <!-- doing:([0-9a-f]{32}):([0-9a-f]*) -->"
     r" \| (.*?) \| (.*?) \| (.*?) \|$"
 )
 UNKNOWN = "unavailable"
+# NUL cannot occur in a command-line ID; older helpers preserve this opaque field.
+OWNERSHIP_PREFIX = "\0doing:"
 
 
 class LedgerError(Exception):
@@ -64,6 +65,30 @@ def escape_cell(value):
     )
 
 
+def parse_session_metadata(encoded):
+    """Return session and parent IDs, or raise LedgerError for malformed metadata.
+
+    Time and additional space: O(n), where n is the metadata size.
+    """
+    try:
+        value = bytes.fromhex(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise LedgerError("Malformed session ID in ledger") from error
+    if not value.startswith(OWNERSHIP_PREFIX):
+        return value or None, None
+    try:
+        owners = json.loads(value[len(OWNERSHIP_PREFIX):])
+    except json.JSONDecodeError as error:
+        raise LedgerError("Malformed ownership metadata in ledger") from error
+    if (
+        not isinstance(owners, list) or len(owners) != 2
+        or (owners[0] is not None and not isinstance(owners[0], str))
+        or not isinstance(owners[1], str) or not owners[1]
+    ):
+        raise LedgerError("Malformed ownership metadata in ledger")
+    return owners[0] or None, owners[1]
+
+
 def parse_ledger(text):
     """Parse the ledger or raise LedgerError without changing it.
 
@@ -80,15 +105,11 @@ def parse_ledger(text):
         match = ROW.fullmatch(line)
         if match is None:
             raise LedgerError("Malformed ledger row")
-        (checked, description, task_id, session_hex, parent_hex,
+        (checked, description, task_id, session_hex,
          location, session, tmux) = match.groups()
         if task_id in seen:
             raise LedgerError("Duplicate task ID in ledger")
-        try:
-            session_id = bytes.fromhex(session_hex).decode("utf-8") or None
-            parent_session_id = bytes.fromhex(parent_hex or "").decode("utf-8") or None
-        except (ValueError, UnicodeDecodeError) as error:
-            raise LedgerError("Malformed session ID in ledger") from error
+        session_id, parent_session_id = parse_session_metadata(session_hex)
         entries.append(
             Entry(
                 task_id,
@@ -118,12 +139,14 @@ def render_ledger(entries, for_display=False):
         status = "x" if entry.completed else " "
         metadata = ""
         if not for_display:
-            session_id = (entry.session_id or "").encode("utf-8").hex()
-            parent = (
-                ":" + entry.parent_session_id.encode("utf-8").hex()
-                if entry.parent_session_id else ""
-            )
-            metadata = f" <!-- doing:{entry.id}:{session_id}{parent} -->"
+            ownership = entry.session_id or ""
+            if entry.parent_session_id:
+                ownership = OWNERSHIP_PREFIX + json.dumps(
+                    [entry.session_id, entry.parent_session_id],
+                    separators=(",", ":"),
+                )
+            session_hex = ownership.encode("utf-8").hex()
+            metadata = f" <!-- doing:{entry.id}:{session_hex} -->"
         visible_id = f"{entry.id} | " if for_display else ""
         lines.append(
             f"| {visible_id}[{status}] {escape_cell(entry.description)}{metadata} | "
