@@ -45,6 +45,69 @@ class LedgerRowTests(unittest.TestCase):
             timeout=10,
         )
 
+    def test_displayed_ids_can_complete_the_selected_task(self):
+        """Expose stable IDs without exposing hidden session metadata."""
+        with tempfile.TemporaryDirectory() as home:
+            ids = []
+            for description in ("First task", "Second task"):
+                created = self.run_doing(home, "task", description)
+                self.assertEqual(created.returncode, 0, created.stderr)
+                ids.append(json.loads(created.stdout)["id"])
+            shown = self.run_doing(home, "show")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertIn("| ID |", shown.stdout)
+            displayed_ids = [
+                line.split("|")[1].strip()
+                for line in shown.stdout.splitlines()[2:]
+            ]
+            self.assertEqual(displayed_ids, ids)
+            self.assertNotIn("<!--", shown.stdout)
+            completed = self.run_doing(home, "done", displayed_ids[1])
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            shown = self.run_doing(home, "show")
+            self.assertIn(ids[0], shown.stdout)
+            self.assertNotIn(ids[1], shown.stdout)
+            history = self.run_doing(home, "show", "all")
+            self.assertIn(ids[1], history.stdout)
+            self.assertIn("[x] Second task", history.stdout)
+
+    def test_resumed_session_recovers_owned_and_delegated_tasks(self):
+        """Recover persisted ownership without including unrelated sessions."""
+        with tempfile.TemporaryDirectory() as home:
+            owned = self.run_doing(
+                home, "task", "Compound task", "--session-id", "parent",
+            )
+            self.assertEqual(owned.returncode, 0, owned.stderr)
+            child = self.run_doing(
+                home, "task", "Review with findings", "--session-id", "child",
+                "--parent-session-id", "parent",
+            )
+            self.assertEqual(child.returncode, 0, child.stderr)
+            unrelated = self.run_doing(
+                home, "task", "Unrelated task", "--session-id", "other",
+            )
+            self.assertEqual(unrelated.returncode, 0, unrelated.stderr)
+            owned_id = json.loads(owned.stdout)["id"]
+            child_id = json.loads(child.stdout)["id"]
+            recovered = self.run_doing(
+                home, "show", "--json", "--session-id", "parent",
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            rows = json.loads(recovered.stdout)
+            self.assertEqual([row["id"] for row in rows], [owned_id, child_id])
+            self.assertIsNone(rows[0]["parent_session_id"])
+            self.assertEqual(rows[1]["parent_session_id"], "parent")
+            completed = self.run_doing(home, "done", child_id)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            remaining = self.run_doing(
+                home, "show", "--json", "--session-id", "parent",
+            )
+            self.assertEqual(json.loads(remaining.stdout)[0]["id"], owned_id)
+            self.assertEqual(len(json.loads(remaining.stdout)), 1)
+            all_rows = self.run_doing(home, "show", "all", "--json")
+            self.assertEqual(len(json.loads(all_rows.stdout)), 3)
+            self.assertFalse(json.loads(all_rows.stdout)[2]["completed"])
+
     def test_line_separators_round_trip_and_allow_updates(self):
         """Preserve text separators in every cell and retain existing tasks."""
         separators = (
