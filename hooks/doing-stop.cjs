@@ -17,11 +17,17 @@ function checkpoint(input) {
     throw new Error("completion checkpoint requires a session or agent ID");
   }
   const helper = path.join(__dirname, "../skills/doing/scripts/doing.py");
-  const result = spawnSync(
-    process.platform === "win32" ? "python" : "python3",
-    [helper, "show", "--json", "--session-id", identity],
-    { encoding: "utf8", timeout: 5000, windowsHide: true },
+  const windows = process.platform === "win32";
+  const args = [helper, "show", "--json", "--session-id", identity];
+  const options = { encoding: "utf8", timeout: 5000, windowsHide: true };
+  let result = spawnSync(
+    windows ? "py" : "python3",
+    windows ? ["-3", ...args] : args,
+    options,
   );
+  if (windows && result.error?.code === "ENOENT") {
+    result = spawnSync("python", args, options);
+  }
   if (result.error || result.status !== 0) {
     return {
       decision: "block",

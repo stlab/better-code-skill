@@ -59,6 +59,86 @@ class TrackingHookTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def run_windows_hook(self, home, available):
+        """Return a checkpoint with simulated Windows command availability.
+
+        Time and space: O(n), where n is the ledger size.
+        """
+        script = r"""
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const nativeSpawn = require("node:child_process").spawnSync;
+const calls = [];
+let output = "", errors = "";
+const sandbox = {
+  __dirname: path.dirname(process.argv[1]),
+  require(name) {
+    if (name !== "node:child_process") return require(name);
+    return { spawnSync(command, args, options) {
+      calls.push(command);
+      if (command === process.argv[3]) {
+        return nativeSpawn(process.argv[2],
+          command === "py" ? args.slice(1) : args, options);
+      }
+      return { error: Object.assign(new Error(command + " not found"),
+        { code: "ENOENT" }), status: null, stderr: "" };
+    } };
+  },
+  process: {
+    platform: "win32", exitCode: 0,
+    stdout: { write(text) { output += text; } },
+    stderr: { write(text) { errors += text; } },
+  },
+};
+vm.runInNewContext(fs.readFileSync(process.argv[1], "utf8"), sandbox);
+process.stdout.write(JSON.stringify({
+  output: JSON.parse(output || "null"), calls, errors,
+  exitCode: sandbox.process.exitCode,
+}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script, str(ROOT / "hooks" / "doing-stop.cjs"),
+             sys.executable, available],
+            input='{"session_id":"windows-session"}',
+            env=dict(os.environ, HOME=home, USERPROFILE=home, PYTHONUTF8="1"),
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_windows_checkpoint_supports_launcher_and_python_only_installs(self):
+        """Reconcile through either supported interpreter without hiding absence."""
+        with tempfile.TemporaryDirectory() as home:
+            task_id = self.run_doing(
+                home, "task", "Windows task", "--session-id", "windows-session",
+            )["id"]
+            for available, calls in (("py", ["py"]),
+                                     ("python", ["py", "python"]),
+                                     ("none", ["py", "python"])):
+                with self.subTest(available=available):
+                    result = self.run_windows_hook(home, available)
+                    self.assertEqual(result["exitCode"], 0, result["errors"])
+                    self.assertEqual(result["output"]["decision"], "block")
+                    reason = result["output"]["reason"]
+                    if available == "none":
+                        self.assertIn("checkpoint failed", reason)
+                        self.assertIn("not found", reason)
+                    else:
+                        self.assertIn(task_id, reason)
+                        self.assertNotIn("checkpoint failed", reason)
+                    self.assertEqual(result["calls"], calls)
+
+    def test_windows_checkpoint_does_not_retry_a_helper_failure(self):
+        """Report ledger errors without masking them behind another interpreter."""
+        with tempfile.TemporaryDirectory() as home:
+            storage = Path(home) / ".better-code"
+            storage.mkdir()
+            (storage / "doing.md").write_text("malformed", encoding="utf-8")
+            result = self.run_windows_hook(home, "py")
+            self.assertIn("Malformed ledger", result["output"]["reason"])
+            self.assertEqual(result["calls"], ["py"])
+
     def test_completion_hook_is_read_only_and_scoped_to_session(self):
         """Request reconciliation only for the session's open work."""
         with tempfile.TemporaryDirectory() as home:
