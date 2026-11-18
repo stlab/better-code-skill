@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import stat
 import subprocess
@@ -44,6 +45,120 @@ class LedgerRowTests(unittest.TestCase):
             capture_output=True,
             timeout=10,
         )
+
+    def test_displayed_ids_can_complete_the_selected_task(self):
+        """Expose stable IDs without exposing hidden session metadata."""
+        with tempfile.TemporaryDirectory() as home:
+            ids = []
+            for description in ("First task", "Second task"):
+                created = self.run_doing(home, "task", description)
+                self.assertEqual(created.returncode, 0, created.stderr)
+                ids.append(json.loads(created.stdout)["id"])
+            shown = self.run_doing(home, "show")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertIn("| ID |", shown.stdout)
+            displayed_ids = [
+                line.split("|")[1].strip()
+                for line in shown.stdout.splitlines()[2:]
+            ]
+            self.assertEqual(displayed_ids, ids)
+            self.assertNotIn("<!--", shown.stdout)
+            completed = self.run_doing(home, "done", displayed_ids[1])
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            shown = self.run_doing(home, "show")
+            self.assertIn(ids[0], shown.stdout)
+            self.assertNotIn(ids[1], shown.stdout)
+            history = self.run_doing(home, "show", "all")
+            self.assertIn(ids[1], history.stdout)
+            self.assertIn("[x] Second task", history.stdout)
+
+    def test_resumed_session_recovers_owned_and_delegated_tasks(self):
+        """Recover persisted ownership without including unrelated sessions."""
+        with tempfile.TemporaryDirectory() as home:
+            owned = self.run_doing(
+                home, "task", "Compound task", "--session-id", "parent",
+            )
+            self.assertEqual(owned.returncode, 0, owned.stderr)
+            child = self.run_doing(
+                home, "task", "Review with findings", "--session-id", "child",
+                "--parent-session-id", "parent",
+            )
+            self.assertEqual(child.returncode, 0, child.stderr)
+            unrelated = self.run_doing(
+                home, "task", "Unrelated task", "--session-id", "other",
+            )
+            self.assertEqual(unrelated.returncode, 0, unrelated.stderr)
+            owned_id = json.loads(owned.stdout)["id"]
+            child_id = json.loads(child.stdout)["id"]
+            recovered = self.run_doing(
+                home, "show", "--json", "--session-id", "parent",
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            rows = json.loads(recovered.stdout)
+            self.assertEqual([row["id"] for row in rows], [owned_id, child_id])
+            self.assertIsNone(rows[0]["parent_session_id"])
+            self.assertEqual(rows[1]["parent_session_id"], "parent")
+            completed = self.run_doing(home, "done", child_id)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            remaining = self.run_doing(
+                home, "show", "--json", "--session-id", "parent",
+            )
+            self.assertEqual(json.loads(remaining.stdout)[0]["id"], owned_id)
+            self.assertEqual(len(json.loads(remaining.stdout)), 1)
+            all_rows = self.run_doing(home, "show", "all", "--json")
+            self.assertEqual(len(json.loads(all_rows.stdout)), 3)
+            self.assertFalse(json.loads(all_rows.stdout)[2]["completed"])
+
+    def test_delegated_rows_keep_the_legacy_metadata_grammar(self):
+        """Keep delegated rows readable by the released helper's row parser."""
+        legacy_row = re.compile(
+            r"^\| \[([ x])\] (.*?) <!-- doing:([0-9a-f]{32}):([0-9a-f]*) -->"
+            r" \| (.*?) \| (.*?) \| (.*?) \|$"
+        )
+        for session_id in (None, "child-session-\u03bb"):
+            with self.subTest(session_id=session_id):
+                with tempfile.TemporaryDirectory() as home:
+                    args = ["task", "Delegated review",
+                            "--parent-session-id", "coordinator-73"]
+                    if session_id is not None:
+                        args += ["--session-id", session_id]
+                    created = self.run_doing(home, *args)
+                    self.assertEqual(created.returncode, 0, created.stderr)
+                    task_id = json.loads(created.stdout)["id"]
+                    ledger = Path(home) / ".better-code" / "doing.md"
+                    rows = ledger.read_text(encoding="utf-8").splitlines()[2:]
+                    self.assertEqual(len(rows), 1)
+                    self.assertRegex(rows[0], legacy_row)
+                    recovered = self.run_doing(
+                        home, "show", "--json", "--session-id", "coordinator-73",
+                    )
+                    self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                    row = json.loads(recovered.stdout)[0]
+                    self.assertEqual(row["id"], task_id)
+                    self.assertEqual(row["session_id"], session_id)
+                    self.assertEqual(row["parent_session_id"], "coordinator-73")
+
+    def test_malformed_ownership_metadata_does_not_overwrite_ledger(self):
+        """Reject invalid serialized ownership instead of losing linkage."""
+        for value in ("\0doing:{", "\0doing:{}", "\0doing:[42,\"parent\"]",
+                      "\0doing:[\"child\",null]"):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as home:
+                    created = self.run_doing(home, "task", "Existing task")
+                    self.assertEqual(created.returncode, 0, created.stderr)
+                    task_id = json.loads(created.stdout)["id"]
+                    ledger = Path(home) / ".better-code" / "doing.md"
+                    original = ledger.read_text(encoding="utf-8")
+                    malformed = original.replace(
+                        f"<!-- doing:{task_id}: -->",
+                        f"<!-- doing:{task_id}:{value.encode('utf-8').hex()} -->",
+                    )
+                    self.assertNotEqual(malformed, original)
+                    ledger.write_text(malformed, encoding="utf-8")
+                    failed = self.run_doing(home, "done", task_id)
+                    self.assertNotEqual(failed.returncode, 0)
+                    self.assertIn("Malformed", failed.stderr)
+                    self.assertEqual(ledger.read_text(encoding="utf-8"), malformed)
 
     def test_line_separators_round_trip_and_allow_updates(self):
         """Preserve text separators in every cell and retain existing tasks."""

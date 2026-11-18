@@ -10,6 +10,14 @@ const context = [
   "When the task is complete, mark that entry done. Leave interrupted, blocked,",
   "failed, or unfinished tasks open. Do not equate a turn ending with completion.",
   "A request only to display the Doing list does not start or complete a task.",
+  "Before every final response, task switch, or handoff, reconcile this session's",
+  "owned task IDs, including delegated tasks, using the Doing completion checkpoint.",
+  "Mark verified complete deliverables done before reporting completion; a review",
+  "or investigation with findings is complete when its requested output is verified.",
+  "Keep compound tasks open until every requested deliverable is complete.",
+  "Persist delegated ownership with --parent-session-id for the coordinating",
+  "session; require handoffs to include Doing ID, completion status, and evidence.",
+  "Never reconcile unrelated sessions without an explicit request.",
   "Report tracking errors rather than claiming the task was recorded.",
 ].join("\n");
 

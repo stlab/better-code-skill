@@ -33,6 +33,8 @@ ROW = re.compile(
     r" \| (.*?) \| (.*?) \| (.*?) \|$"
 )
 UNKNOWN = "unavailable"
+# NUL cannot occur in a command-line ID; older helpers preserve this opaque field.
+OWNERSHIP_PREFIX = "\0doing:"
 
 
 class LedgerError(Exception):
@@ -50,6 +52,7 @@ class Entry:
     session_id: str | None
     tmux: str
     completed: bool = False
+    parent_session_id: str | None = None
 
 
 def escape_cell(value):
@@ -60,6 +63,30 @@ def escape_cell(value):
         .replace("\n", "&#10;")
         .replace("\r", "&#13;")
     )
+
+
+def parse_session_metadata(encoded):
+    """Return session and parent IDs, or raise LedgerError for malformed metadata.
+
+    Time and additional space: O(n), where n is the metadata size.
+    """
+    try:
+        value = bytes.fromhex(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise LedgerError("Malformed session ID in ledger") from error
+    if not value.startswith(OWNERSHIP_PREFIX):
+        return value or None, None
+    try:
+        owners = json.loads(value[len(OWNERSHIP_PREFIX):])
+    except json.JSONDecodeError as error:
+        raise LedgerError("Malformed ownership metadata in ledger") from error
+    if (
+        not isinstance(owners, list) or len(owners) != 2
+        or (owners[0] is not None and not isinstance(owners[0], str))
+        or not isinstance(owners[1], str) or not owners[1]
+    ):
+        raise LedgerError("Malformed ownership metadata in ledger")
+    return owners[0] or None, owners[1]
 
 
 def parse_ledger(text):
@@ -78,15 +105,11 @@ def parse_ledger(text):
         match = ROW.fullmatch(line)
         if match is None:
             raise LedgerError("Malformed ledger row")
-        checked, description, task_id, session_hex, location, session, tmux = (
-            match.groups()
-        )
+        (checked, description, task_id, session_hex,
+         location, session, tmux) = match.groups()
         if task_id in seen:
             raise LedgerError("Duplicate task ID in ledger")
-        try:
-            session_id = bytes.fromhex(session_hex).decode("utf-8") or None
-        except (ValueError, UnicodeDecodeError) as error:
-            raise LedgerError("Malformed session ID in ledger") from error
+        session_id, parent_session_id = parse_session_metadata(session_hex)
         entries.append(
             Entry(
                 task_id,
@@ -96,26 +119,37 @@ def parse_ledger(text):
                 session_id,
                 html.unescape(tmux),
                 checked == "x",
+                parent_session_id,
             )
         )
         seen.add(task_id)
     return entries
 
 
-def render_ledger(entries, include_ids=True):
-    """Render entries as a Markdown table.
+def render_ledger(entries, for_display=False):
+    """Render a storage table, or a display table with visible task IDs.
 
     Time and additional space: O(n), where n is the rendered size.
     """
-    lines = [HEADER]
+    lines = [HEADER if not for_display else (
+        "| ID | Description | Location | Session | tmux |\n"
+        "| --- | --- | --- | --- | --- |\n"
+    )]
     for entry in entries:
         status = "x" if entry.completed else " "
         metadata = ""
-        if include_ids:
-            session_id = (entry.session_id or "").encode("utf-8").hex()
-            metadata = f" <!-- doing:{entry.id}:{session_id} -->"
+        if not for_display:
+            ownership = entry.session_id or ""
+            if entry.parent_session_id:
+                ownership = OWNERSHIP_PREFIX + json.dumps(
+                    [entry.session_id, entry.parent_session_id],
+                    separators=(",", ":"),
+                )
+            session_hex = ownership.encode("utf-8").hex()
+            metadata = f" <!-- doing:{entry.id}:{session_hex} -->"
+        visible_id = f"{entry.id} | " if for_display else ""
         lines.append(
-            f"| [{status}] {escape_cell(entry.description)}{metadata} | "
+            f"| {visible_id}[{status}] {escape_cell(entry.description)}{metadata} | "
             f"{escape_cell(entry.location)} | {escape_cell(entry.session)} | "
             f"{escape_cell(entry.tmux)} |\n"
         )
@@ -256,6 +290,7 @@ def write_change(directory, command, args):
                     task_id, args.description, args.location or UNKNOWN,
                     args.session_name or UNKNOWN, args.session_id or None,
                     args.tmux or UNKNOWN,
+                    parent_session_id=args.parent_session_id or None,
                 )
             )
         else:
@@ -280,6 +315,7 @@ def entry_json(entry):
         "location": entry.location,
         "session": entry.session,
         "session_id": entry.session_id,
+        "parent_session_id": entry.parent_session_id,
         "tmux": entry.tmux,
         "completed": entry.completed,
     }
@@ -294,12 +330,14 @@ def parse_args():
     task.add_argument("--location")
     task.add_argument("--session-name")
     task.add_argument("--session-id")
+    task.add_argument("--parent-session-id", help="Session coordinating delegated work")
     task.add_argument("--tmux")
     done = subcommands.add_parser("done", help="Complete one task by ID")
     done.add_argument("id")
     show = subcommands.add_parser("show", help="Show tasks")
     show.add_argument("scope", nargs="?", choices=("open", "all"), default="open")
     show.add_argument("--json", action="store_true")
+    show.add_argument("--session-id", help="Include this session and its delegated tasks")
     return parser.parse_args()
 
 
@@ -327,10 +365,17 @@ def main():
                 close_store(directory)
         if args.scope == "open":
             entries = [entry for entry in entries if not entry.completed]
+        if args.session_id is not None:
+            if not args.session_id.strip():
+                raise LedgerError("Session ID must not be empty")
+            entries = [
+                entry for entry in entries
+                if args.session_id in (entry.session_id, entry.parent_session_id)
+            ]
         if args.json:
             print(json.dumps([entry_json(entry) for entry in entries]))
         else:
-            print(render_ledger(entries, include_ids=False), end="")
+            print(render_ledger(entries, for_display=True), end="")
     except (LedgerError, OSError, UnicodeError) as error:
         print(f"doing: {error}", file=sys.stderr)
         sys.exit(1)

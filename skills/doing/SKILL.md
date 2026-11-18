@@ -1,7 +1,7 @@
 ---
 name: doing
 description: Use when starting, continuing, or completing any task, including single-step work, or when displaying tracked work.
-argument-hint: "show [all] | task <DESCRIPTION> | done"
+argument-hint: "show [all] | task <DESCRIPTION> | done [ID]"
 ---
 
 # Doing
@@ -38,6 +38,14 @@ one argument. Record a concise description without secrets. Save the returned
 task ID in the session context; it identifies this entry even if the session is
 renamed or other work starts.
 
+For delegated work, also pass `--parent-session-id` with the coordinating
+session's ID. Give that ID to delegates, including nested delegates, so their
+entries remain recoverable by the coordinator. Record the delegate's own
+`--session-id` when the host supplies it. For Claude Code subagents, use the
+host-provided `agent_id` as their `--session-id`; the shared parent `session_id`
+identifies the coordinator, not the child. Never invent an ID. If the delegate
+continues the same task, pass the saved task ID instead of creating another entry.
+
 Use the repository being worked on for location. The host's current repository
 identity applies only when it is the target of the work; use the relevant
 working directory if no repository identity is available. For Copilot, the
@@ -51,6 +59,50 @@ For tmux, use `tmux display-message -p -t "$TMUX_PANE" '#S'` only when both
 `TMUX` and `TMUX_PANE` are set. If the command fails or the pane isn't available,
 omit `--tmux`; don't infer a session from the repository name.
 
+## Completion checkpoint
+
+Before every final response, task switch, or handoff, reconcile the task IDs
+owned by this session, including delegated tasks. Use saved IDs; after a resume
+or context loss, run `show --json --session-id SESSION_ID` to recover this
+session's open entries and explicitly linked delegated entries. Replace
+`SESSION_ID` with the host-provided session ID. Match task context before acting.
+Do not reconcile unrelated sessions without an explicit request.
+
+For each task, compare the requested deliverables with verified results:
+
+- If every deliverable is complete, run `done ID` before reporting completion.
+  A review or investigation is complete when its requested output is verified,
+  even if it identifies findings. Repairs are separate work unless included in
+  that task.
+- If any deliverable remains partial, blocked, failed, or interrupted, keep the
+  entry open. A published review, merged PR, handoff, or turn ending does not
+  complete an unfinished compound task.
+- If the helper fails, report the task ID and error. Distinguish a verified
+  deliverable from an unconfirmed ledger update; never claim it was checked off.
+  Use `show all --json` to check an uncertain update before retrying.
+
+Delegated results must include these fields:
+
+| Field | Required content |
+| --- | --- |
+| Doing ID | The saved task ID, or the tracking error if no ID was obtained. |
+| Completion status | Deliverable complete or incomplete; ledger done, open, or update unconfirmed. |
+| Evidence | Verification command and result, report location, or other evidence for each requested deliverable; remaining work and helper errors. |
+
+The parent reconciles returned IDs against these results before its own final
+response. A complete child review does not complete a parent task that also
+requires repairs.
+
+On hosts that run the plugin's `Stop` and `SubagentStop` hooks, an open owned
+entry triggers one reconciliation reminder. The hooks read the helper's scoped
+output; they never mark entries done. The `stop_hook_active` guard allows a
+response with legitimately open tasks instead of repeatedly blocking it.
+`SubagentStop` scopes feedback to the child's `agent_id`, not the shared parent
+session. If the child's identity was unavailable when tracking started, the
+coordinator still recovers its linked entry at the parent's checkpoint.
+On other hosts, perform this checkpoint explicitly. A display-only request
+never starts or completes entries, even if a hook reminds you about open work.
+
 ## Commands
 
 The user can invoke `better-code:doing` with these arguments:
@@ -62,8 +114,10 @@ The user can invoke `better-code:doing` with these arguments:
 | `show all` | Display the helper's `show all` table, including completed entries. |
 | `task DESCRIPTION` | Record the specified task as started, even if it is short. |
 | `done` | Complete the current task. |
+| `done ID` | Complete the task identified by the full ID shown in the table. |
 
-Use the helper's `show --json` to inspect task IDs and session IDs when needed.
+The `show` table includes full task IDs accepted by `done ID`. Use the helper's
+`show --json` to inspect session ownership as well.
 For `done`, use the current task's saved ID. If it is unavailable, match the
 current session ID and task context against open entries. When exactly one entry
 is identifiable, pass its ID to `done ID`. If no entry or more than one entry

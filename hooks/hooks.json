@@ -10,6 +10,26 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"require(process.env.CLAUDE_PLUGIN_ROOT + '/hooks/doing-stop.cjs')\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"require(process.env.CLAUDE_PLUGIN_ROOT + '/hooks/doing-stop.cjs')\""
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

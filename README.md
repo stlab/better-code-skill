@@ -70,8 +70,17 @@ Better Code skill first. The hooks run on session resume too; continuations
 reuse the task's existing entry. Requests only to display the list do not add
 entries.
 
-The hooks use Node.js and return context to Copilot; they do not read prompt
-contents, write the ledger, or edit your user-level instructions. Automatic
+The `Stop` and `SubagentStop` completion hooks invoke the Python helper to read
+open tasks owned by the session or subagent. They can block a final response
+once to request evidence-based reconciliation, including when the helper fails.
+The agent marks verified deliverables done and keeps partial, blocked, failed,
+or interrupted work open. A completed review can be done even with findings;
+an unfinished repair deliverable keeps its compound task open. The
+`stop_hook_active` guard prevents repeated blocking when work must remain open.
+
+The hooks use Node.js and return context or checkpoint feedback. They use
+session and agent identities, not prompt or transcript contents, and do not
+write the ledger or edit your user-level instructions. Automatic
 tracking still depends on enabled hooks, the agent following the instructions,
 and permission to run the helper and write the ledger. The helper requires
 Python 3.9 or later, with no additional Python packages. It supports native
@@ -98,6 +107,10 @@ If the helper reports that an update may have been saved, inspect its
 `show all --json` output for the reported task ID before retrying. An error after
 replacement does not roll back a visible update.
 
+Delegated ownership stays inside the existing session-metadata field so older
+helpers can still read and rewrite the ledger. Older helpers treat this
+ownership as opaque; use an updated helper to recover parent/child linkage.
+
 In Copilot, you can invoke the skill explicitly:
 
 ```text
@@ -106,9 +119,13 @@ In Copilot, you can invoke the skill explicitly:
 /better-code:doing show all
 /better-code:doing task Investigate the parser
 /better-code:doing done
+/better-code:doing done TASK_ID
 ```
 
-The slash-command picker shows `show [all] | task <DESCRIPTION> | done` beside the skill.
+Replace `TASK_ID` with the full ID from the `show` table to complete that entry.
+Without an ID, `done` completes the identifiable current task.
+
+The slash-command picker shows `show [all] | task <DESCRIPTION> | done [ID]` beside the skill.
 
 To verify automatic tracking, start a task in a new Copilot session and use
 `/better-code:doing show all` to inspect its entry after the task finishes.
