@@ -77,6 +77,8 @@ const sandbox = {
     if (name !== "node:child_process") return require(name);
     return { spawnSync(command, args, options) {
       calls.push(command);
+      const local = path.join(options.cwd || process.cwd(), command + ".exe");
+      if (fs.existsSync(local)) return nativeSpawn(local, args, options);
       if (command === process.argv[3]) {
         return nativeSpawn(process.argv[2],
           command === "py" ? args.slice(1) : args, options);
@@ -101,6 +103,7 @@ process.stdout.write(JSON.stringify({
             ["node", "-e", script, str(ROOT / "hooks" / "doing-stop.cjs"),
              sys.executable, available],
             input='{"session_id":"windows-session"}',
+            cwd=home,
             env=dict(os.environ, HOME=home, USERPROFILE=home, PYTHONUTF8="1"),
             capture_output=True, text=True, encoding="utf-8", timeout=10,
         )
@@ -138,6 +141,27 @@ process.stdout.write(JSON.stringify({
             result = self.run_windows_hook(home, "py")
             self.assertIn("Malformed ledger", result["output"]["reason"])
             self.assertEqual(result["calls"], ["py"])
+
+    def test_windows_checkpoint_ignores_project_interpreters(self):
+        """Ignore a project-root executable that shadows the Python launcher."""
+        with tempfile.TemporaryDirectory() as home:
+            task_id = self.run_doing(
+                home, "task", "Windows task", "--session-id", "windows-session",
+            )["id"]
+            local = Path(home) / "py.exe"
+            if os.name == "nt":
+                shutil.copy2(shutil.which("node"), local)
+            else:
+                local.symlink_to(shutil.which("node"))
+            result = self.run_windows_hook(home, "py")
+            self.assertIn(task_id, result["output"]["reason"])
+            self.assertNotIn("checkpoint failed", result["output"]["reason"])
+            if os.name == "nt":
+                native = self.run_hook(
+                    "Stop", home, '{"session_id":"windows-session"}',
+                )
+                self.assertEqual(native.returncode, 0, native.stderr)
+                self.assertIn(task_id, json.loads(native.stdout)["reason"])
 
     def test_completion_hook_is_read_only_and_scoped_to_session(self):
         """Request reconciliation only for the session's open work."""

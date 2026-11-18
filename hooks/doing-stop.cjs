@@ -19,7 +19,9 @@ function checkpoint(input) {
   const helper = path.join(__dirname, "../skills/doing/scripts/doing.py");
   const windows = process.platform === "win32";
   const args = [helper, "show", "--json", "--session-id", identity];
-  const options = { encoding: "utf8", timeout: 5000, windowsHide: true };
+  const options = {
+    cwd: path.dirname(helper), encoding: "utf8", timeout: 5000, windowsHide: true,
+  };
   let result = spawnSync(
     windows ? "py" : "python3",
     windows ? ["-3", ...args] : args,
