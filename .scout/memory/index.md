@@ -10,4 +10,4 @@
 
 ## Procedures
 
-- [[procedures/plugin-release-and-ci-test-selection.md|Plugin release and CI test selection]] (procedure, 0.70) `release` `ci` `versioning` `manifests` `workflows`
+- [[procedures/plugin-release-and-ci-test-selection.md|Plugin release and CI test selection]] (procedure, 0.75) `release` `ci` `versioning` `manifests` `workflows` `concurrency` `pre-push`
